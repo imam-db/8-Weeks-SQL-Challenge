@@ -199,4 +199,332 @@ FROM runner_orders AS ro)
 SELECT sd.runner_id,
 	ROUND(AVG(is_success)*100,0) AS delivery_percentage
 FROM successful_delivery AS sd
-GROUP BY sd.runner_id
+GROUP BY sd.runner_id;
+
+# Ingredient Optimisation
+
+## 1. What are the standard ingredients for each pizza?
+WITH RECURSIVE pizza AS (
+    SELECT *
+      FROM pizza_recipes
+    UNION ALL
+    SELECT pizza_id, 
+	regexp_replace(toppings, '^[^,]*,', '') AS toppings
+      FROM pizza
+      WHERE toppings LIKE '%,%'
+),
+pt AS
+(
+SELECT pizza_id, 
+	TRIM(regexp_replace(toppings, ',.*', '')) AS toppings
+FROM pizza
+ORDER BY pizza_id
+), 
+pt_meatlovers
+AS
+(
+SELECT pts.*
+FROM pt AS pt
+INNER JOIN pizza_toppings AS pts
+ON pt.toppings = pts.topping_id
+WHERE pizza_id = 1
+),
+pt_vegetarian
+AS
+(
+SELECT pts.*
+FROM pt AS pt
+INNER JOIN pizza_toppings AS pts
+ON pt.toppings = pts.topping_id
+WHERE pizza_id = 2
+)
+
+SELECT ptm.*
+FROM pt_meatlovers AS ptm
+INNER JOIN pt_vegetarian AS ptv
+ON ptm.topping_id = ptv.topping_id;
+
+## 2. What was the most commonly added extra?
+
+WITH RECURSIVE pizza AS (
+	SELECT order_id,
+		extras
+	FROM customer_orders
+	UNION ALL
+	SELECT order_id, 
+		regexp_replace(extras, '^[^,]*,', '') AS toppings
+	FROM pizza
+	WHERE extras LIKE '%,%'
+)
+, pt AS
+(
+SELECT order_id,
+	TRIM(regexp_replace(extras, ',.*', '')) AS topping
+FROM pizza
+)
+, pt_final AS
+(
+SELECT pts.topping_id,
+	pts.topping_name,
+	COUNT(topping_id) AS total,
+	ROW_NUMBER() OVER(ORDER BY COUNT(topping_id) DESC) AS number
+FROM pt
+INNER JOIN pizza_toppings AS pts
+ON pt.topping = pts.topping_id
+WHERE topping IS NOT NULL OR topping <> ""
+GROUP BY pts.topping_id
+)
+
+SELECT *
+FROM pt_final
+WHERE number = 1;
+
+## 3. What was the most common exclusion?
+WITH RECURSIVE pizza AS (
+	SELECT order_id,
+		exclusions
+	FROM customer_orders
+	UNION ALL
+	SELECT order_id, 
+		regexp_replace(exclusions, '^[^,]*,', '') AS toppings
+	FROM pizza
+	WHERE exclusions LIKE '%,%'
+)
+, pt AS
+(
+SELECT order_id,
+	TRIM(regexp_replace(exclusions, ',.*', '')) AS topping
+FROM pizza
+)
+, pt_final AS
+(
+SELECT pts.topping_id,
+	pts.topping_name,
+	COUNT(topping_id) AS total,
+	ROW_NUMBER() OVER(ORDER BY COUNT(topping_id) DESC) AS number
+FROM pt
+INNER JOIN pizza_toppings AS pts
+ON pt.topping = pts.topping_id
+WHERE topping IS NOT NULL OR topping <> ""
+GROUP BY pts.topping_id
+)
+
+SELECT *
+FROM pt_final
+WHERE number = 1;
+
+## 4. Generate an order item for each record in the customers_orders table in the format one of the following format
+
+### Meat Lovers
+### Meat Lovers - Exclude Cheese, Bacon - Extra Mushroom, Peppers
+### Meat Lovers - Exclude Beef
+### Meat Lovers - Extra Bacon
+
+SELECT *, 
+	CASE WHEN pizza_id = 1 AND exclusions IS NULL AND (extras IS NULL OR extras = "") THEN "Meat Lovers"
+		WHEN pizza_id = 1 AND (exclusions LIKE '%4%' AND exclusions LIKE '%1%') AND (extras LIKE '%6%' AND extras LIKE '%9%') 
+			THEN 'Meat Lovers - Exclude Cheese, Bacon - Extra Mushroom, Peppers' 
+		WHEN pizza_id = 1 AND exclusions LIKE '%3%' THEN "Meat Lovers - Exclude Beef"
+		WHEN pizza_id = 1 AND extras LIKE '%1%' THEN "Meat Lovers - Extra Bacon"
+		ELSE "Meat Lovers" END AS order_item
+FROM customer_orders;
+
+## 5. Generate an alphabetically ordered comma separated ingredient list for each pizza order from the customer_orders table and add a 2x in front of any relevant ingredients 
+### For example: "Meat Lovers: 2xBacon, Beef, ... , Salami"
+
+WITH RECURSIVE pizza AS (
+    SELECT *
+      FROM pizza_recipes
+    UNION ALL
+    SELECT pizza_id, 
+	regexp_replace(toppings, '^[^,]*,', '') AS toppings
+      FROM pizza
+      WHERE toppings LIKE '%,%'
+),
+pt AS
+(
+SELECT pizza_id, 
+	TRIM(regexp_replace(toppings, ',.*', '')) AS toppings
+FROM pizza
+ORDER BY pizza_id
+),
+pt_label AS
+(
+SELECT pt.*, 
+	pts.topping_name
+FROM pt AS pt
+INNER JOIN pizza_toppings AS pts
+ON pt.toppings = pts.topping_id
+),
+pizza_exclude AS (
+SELECT order_id,
+	exclusions
+FROM customer_orders
+UNION ALL
+SELECT order_id,
+	regexp_replace(exclusions, '^[^,]*,', '') AS toppings
+FROM pizza_exclude
+WHERE exclusions LIKE '%,%'
+)
+, pa AS
+(
+SELECT order_id,
+	TRIM(regexp_replace(exclusions, ',.*', '')) AS topping_exclude
+FROM pizza_exclude
+),order_items AS
+(
+SELECT *, 
+	CASE WHEN pizza_id = 1 AND exclusions IS NULL AND (extras IS NULL OR extras = "") THEN "Meat Lovers"
+		WHEN pizza_id = 1 AND (exclusions LIKE '%4%' AND exclusions LIKE '%1%') AND (extras LIKE '%6%' AND extras LIKE '%9%') 
+			THEN 'Meat Lovers - Exclude Cheese, Bacon - Extra Mushroom, Peppers' 
+		WHEN pizza_id = 1 AND exclusions LIKE '%3%' THEN "Meat Lovers - Exclude Beef"
+		WHEN pizza_id = 1 AND extras LIKE '%1%' THEN "Meat Lovers - Extra Bacon"
+		ELSE "Meat Lovers" END AS order_item
+FROM customer_orders
+)
+, final AS
+(
+SELECT pt_label.topping_name,
+	oi.*,
+	CASE WHEN topping_exclude IS NULL THEN "2x" ELSE "" END AS status_relevant
+FROM pt_label
+INNER JOIN order_items AS oi
+ON pt_label.pizza_id = oi.pizza_id
+LEFT JOIN pa 
+ON pa.order_id = oi.order_id
+AND pt_label.toppings = pa.topping_exclude
+)
+
+SELECT order_id,
+	customer_id,
+	pizza_id,
+	order_item,
+	GROUP_CONCAT(CONCAT(status_relevant,topping_name) 
+			ORDER BY status_relevant ASC
+			SEPARATOR ",") AS ingredients
+FROM final
+GROUP BY order_id,
+	customer_id,
+	pizza_id
+ORDER BY order_id,
+	customer_id,
+	pizza_id,
+	order_item ASC;
+
+## 6. What is the total quantity of each ingredient used in all delivered pizzas sorted by most frequent first?
+
+WITH RECURSIVE pizza AS (
+    SELECT *
+      FROM pizza_recipes
+    UNION ALL
+    SELECT pizza_id, 
+	regexp_replace(toppings, '^[^,]*,', '') AS toppings
+      FROM pizza
+      WHERE toppings LIKE '%,%'
+),
+pt AS
+(
+SELECT pizza_id, 
+	TRIM(regexp_replace(toppings, ',.*', '')) AS toppings
+FROM pizza
+ORDER BY pizza_id
+),
+pt_label AS
+(
+SELECT pt.*, 
+	pts.topping_name
+FROM pt AS pt
+INNER JOIN pizza_toppings AS pts
+ON pt.toppings = pts.topping_id
+),
+pizza_exclude AS (
+SELECT order_id,
+	exclusions
+FROM customer_orders
+UNION ALL
+SELECT order_id,
+	regexp_replace(exclusions, '^[^,]*,', '') AS toppings
+FROM pizza_exclude
+WHERE exclusions LIKE '%,%'
+)
+, pa AS
+(
+SELECT order_id,
+	TRIM(regexp_replace(exclusions, ',.*', '')) AS topping_exclude
+FROM pizza_exclude
+),
+pizza_extras AS (
+SELECT order_id,
+	extras
+FROM customer_orders
+UNION ALL
+SELECT order_id,
+	regexp_replace(extras, '^[^,]*,', '') AS toppings
+FROM pizza_extras
+WHERE extras LIKE '%,%'
+)
+, pe AS
+(
+SELECT order_id,
+	TRIM(regexp_replace(extras, ',.*', '')) AS topping_extras
+FROM pizza_extras
+),
+pe_final AS
+(
+SELECT *
+FROM pe
+WHERE topping_extras IS NOT NULL OR topping_extras != ""
+),
+order_items AS
+(
+SELECT *, 
+	CASE WHEN pizza_id = 1 AND exclusions IS NULL AND (extras IS NULL OR extras = "") THEN "Meat Lovers"
+		WHEN pizza_id = 1 AND (exclusions LIKE '%4%' AND exclusions LIKE '%1%') AND (extras LIKE '%6%' AND extras LIKE '%9%') 
+			THEN 'Meat Lovers - Exclude Cheese, Bacon - Extra Mushroom, Peppers' 
+		WHEN pizza_id = 1 AND exclusions LIKE '%3%' THEN "Meat Lovers - Exclude Beef"
+		WHEN pizza_id = 1 AND extras LIKE '%1%' THEN "Meat Lovers - Extra Bacon"
+		ELSE "Meat Lovers" END AS order_item
+FROM customer_orders
+)
+, 
+final AS
+(
+SELECT pt_label.topping_name,
+	pt_label.toppings,
+	oi.*
+FROM pt_label
+INNER JOIN order_items AS oi
+ON pt_label.pizza_id = oi.pizza_id
+INNER JOIN pa 
+ON pa.order_id = oi.order_id
+AND pt_label.toppings != pa.topping_exclude
+),
+pefinal_final AS
+(
+SELECT pt_label.topping_name,
+	pt_label.toppings,
+	oi.*
+FROM pt_label
+INNER JOIN order_items AS oi
+ON pt_label.pizza_id = oi.pizza_id
+INNER JOIN pe_final
+ON pe_final.order_id = oi.order_id
+AND pt_label.toppings = pe_final.topping_extras
+), 
+unionall AS
+(
+SELECT *
+FROM final
+UNION ALL
+SELECT *
+FROM pefinal_final
+)
+
+SELECT topping_name,
+	COUNT(toppings) AS total_toppings
+FROM unionall
+INNER JOIN runner_orders AS ro
+ON unionall.order_id = ro.order_id
+WHERE ro.pickup_time IS NOT NULL
+GROUP BY toppings
+ORDER BY total_toppings DESC;
