@@ -528,3 +528,115 @@ ON unionall.order_id = ro.order_id
 WHERE ro.pickup_time IS NOT NULL
 GROUP BY toppings
 ORDER BY total_toppings DESC;
+
+
+# Pricing and Ratings
+
+## 1. If a Meat Lovers pizza costs $12 and Vegetarian costs $10 and there were no charges for changes - how much money has Pizza Runner made so far if there are no delivery fees?
+
+SELECT SUM(CASE WHEN co.pizza_id = 1 THEN 10 ELSE 12 END) AS total_money
+FROM customer_orders AS co
+INNER JOIN runner_orders AS ro
+ON co.`order_id` = ro.`order_id`
+WHERE ro.`pickup_time` IS NOT NULL;
+
+## 2. What if there was an additional $1 charge for any pizza extras?
+
+WITH RECURSIVE pizza AS (
+	SELECT order_id,
+		pizza_id,
+		extras
+	FROM customer_orders
+	UNION ALL
+	SELECT order_id, 
+		pizza_id,
+		regexp_replace(extras, '^[^,]*,', '') AS toppings
+	FROM pizza
+	WHERE extras LIKE '%,%'
+)
+, pt AS
+(
+SELECT order_id,
+	pizza_id,
+	TRIM(regexp_replace(extras, ',.*', '')) AS topping
+FROM pizza
+),
+tm AS
+(
+SELECT SUM(CASE WHEN co.pizza_id = 1 THEN 10 ELSE 12 END) AS total_money
+FROM customer_orders AS co
+INNER JOIN runner_orders AS ro
+ON co.`order_id` = ro.`order_id`
+WHERE ro.`pickup_time` IS NOT NULL
+)
+
+SELECT COUNT(*) * 1 + (SELECT total_money FROM tm) AS total_money
+FROM pt
+WHERE topping IS NOT NULL OR topping != "";
+
+## 3. The Pizza Runner team now wants to add an additional ratings system that allows customers to rate their runner, 
+##	how would you design an additional table for this new dataset - 
+## 	generate a schema for this new table and insert your own data for ratings for each successful customer order between 1 to 5.
+
+CREATE TABLE rating_table (
+	order_id INT PRIMARY KEY,
+	rating TINYINT
+);
+
+INSERT INTO rating_table(order_id, rating)
+SELECT co.order_id,
+	FLOOR( RAND() * (5-1) + 1) AS random_rating
+FROM customer_orders AS co
+GROUP BY co.order_id;
+
+## 4. Using your newly generated table - can you join all of the information together to form a table which has the following information for successful deliveries? 
+
+#    customer_id
+#    order_id
+#    runner_id
+#    rating
+#    order_time
+#    pickup_time
+#    Time between order and pickup
+#    Delivery duration
+#    Average speed
+#    Total number of pizzas
+
+SELECT co.`customer_id`, 
+	co.`order_id`,
+	ro.`runner_id`,
+	rt.`rating`,
+	co.`order_time`,
+	ro.`pickup_time`,
+	TIMESTAMPDIFF(MINUTE, co.`order_time`, ro.`pickup_time`) AS time_order_pickup,
+	ro.`duration`,
+	ROUND(ro.`distance` / (ro.duration/60),0) AS avg_speed,
+	COUNT(co.pizza_id) AS total_pizza
+FROM customer_orders AS co
+INNER JOIN runner_orders AS ro
+ON co.`order_id` = ro.`order_id`
+INNER JOIN rating_table AS rt
+ON rt.`order_id` = co.`order_id`
+WHERE ro.`pickup_time` IS NOT NULL
+GROUP BY co.order_id;
+
+## 5. If a Meat Lovers pizza was $12 and Vegetarian $10 fixed prices with no cost for extras and each runner is paid $0.30 per kilometre traveled - 
+## 	how much money does Pizza Runner have left over after these deliveries?
+
+WITH pizza_prices AS
+(
+SELECT SUM(CASE WHEN co.pizza_id = 1 THEN 10 ELSE 12 END) AS total_money
+FROM customer_orders AS co
+INNER JOIN runner_orders AS ro
+ON co.`order_id` = ro.`order_id`
+WHERE ro.`pickup_time` IS NOT NULL
+),
+distance AS
+(
+SELECT SUM(ro.distance * 0.3) AS distance_money
+FROM runner_orders AS ro
+WHERE ro.distance IS NOT NULL
+)
+
+SELECT total_money - (SELECT distance_money FROM distance) AS leftover_money 
+FROM pizza_prices;
